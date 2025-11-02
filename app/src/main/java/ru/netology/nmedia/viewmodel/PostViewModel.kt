@@ -36,22 +36,35 @@ private val noPhoto = PhotoModel()
 @HiltViewModel
 class PostViewModel @Inject constructor(
     private val repository: PostRepository,
-    auth: AppAuth,
+    private val auth: AppAuth, // Добавил private
 ) : ViewModel() {
-    private val cached = repository
-        .data
-        .cachedIn(viewModelScope)
 
+    // Упростил Flow - убрал лишние преобразования
     val data: Flow<PagingData<Post>> = auth.authStateFlow
         .flatMapLatest { (myId, _) ->
-            cached.map { pagingData ->
-                pagingData.map { post ->
-                    post.copy(ownedByMe = post.authorId == myId)
+            repository.data
+                .map { pagingData ->
+                    pagingData.map { post ->
+                        post.copy(ownedByMe = post.authorId == myId)
+                    }
                 }
-            }
         }
+        .cachedIn(viewModelScope)
 
-    private val _dataState = MutableLiveData<FeedModelState>()
+    // Убрал задержку и упростил инвалидацию
+    init {
+        auth.authStateFlow
+            // .distinctUntilChanged() // Добавил для оптимизации
+            .onEach {
+                repository.invalidate()
+            }
+            .launchIn(viewModelScope)
+    }
+
+    // Убрал дублирующий refresh метод
+    // fun refresh() { ... } // УДАЛИТЬ - дублирует refreshPosts
+
+    private val _dataState = MutableLiveData(FeedModelState())
     val dataState: LiveData<FeedModelState>
         get() = _dataState
 
@@ -71,7 +84,7 @@ class PostViewModel @Inject constructor(
     fun loadPosts() = viewModelScope.launch {
         try {
             _dataState.value = FeedModelState(loading = true)
-            // repository.stream.cachedIn(viewModelScope).
+            // Для Paging 3 данные загружаются автоматически при коллекте data Flow
             _dataState.value = FeedModelState()
         } catch (e: Exception) {
             _dataState.value = FeedModelState(error = true)
@@ -81,7 +94,7 @@ class PostViewModel @Inject constructor(
     fun refreshPosts() = viewModelScope.launch {
         try {
             _dataState.value = FeedModelState(refreshing = true)
-//            repository.getAll()
+            repository.invalidate() // Явно инвалидируем для обновления
             _dataState.value = FeedModelState()
         } catch (e: Exception) {
             _dataState.value = FeedModelState(error = true)
@@ -89,16 +102,18 @@ class PostViewModel @Inject constructor(
     }
 
     fun save() {
-        edited.value?.let {
+        edited.value?.let { post ->
             viewModelScope.launch {
                 try {
                     repository.save(
-                        it, _photo.value?.uri?.let { MediaUpload(it.toFile()) }
+                        post,
+                        _photo.value?.uri?.let { MediaUpload(it.toFile()) }
                     )
-
                     _postCreated.value = Unit
+                    // После сохранения инвалидируем для обновления списка
+                    repository.invalidate()
                 } catch (e: Exception) {
-                    e.printStackTrace()
+                    _dataState.value = FeedModelState(error = true)
                 }
             }
         }
@@ -122,11 +137,21 @@ class PostViewModel @Inject constructor(
         _photo.value = PhotoModel(uri)
     }
 
-    fun likeById(id: Long) {
-        TODO()
+    fun likeById(id: Long) = viewModelScope.launch {
+        try {
+            repository.likeById(id)
+            // Данные автоматически обновятся через invalidate() в репозитории
+        } catch (e: Exception) {
+            _dataState.value = FeedModelState(error = true)
+        }
     }
 
-    fun removeById(id: Long) {
-        TODO()
+    fun removeById(id: Long) = viewModelScope.launch {
+        try {
+            repository.removeById(id)
+            // Данные автоматически обновятся через invalidate() в репозитории
+        } catch (e: Exception) {
+            _dataState.value = FeedModelState(error = true)
+        }
     }
 }
